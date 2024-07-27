@@ -26,6 +26,12 @@ impl From<bevy::math::Vec3> for Vec3 {
     }
 }
 
+impl Into<bevy::math::Vec3> for Vec3 {
+    fn into(self) -> bevy::math::Vec3 {
+        bevy::math::Vec3::new(self.x, self.y, self.z)
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 #[wasm_bindgen]
 pub struct Quat {
@@ -46,6 +52,12 @@ impl From<bevy::math::Quat> for Quat {
     }
 }
 
+impl Into<bevy::math::Quat> for Quat {
+    fn into(self) -> bevy::math::Quat {
+        bevy::math::quat(self.x, self.y, self.z, self.w)
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 #[wasm_bindgen]
 pub struct Transform {
@@ -60,6 +72,16 @@ impl From<bevy::transform::components::Transform> for Transform {
             translation: transform.translation.into(),
             rotation: transform.rotation.into(),
             scale: transform.scale.into(),
+        }
+    }
+}
+
+impl Into<bevy::transform::components::Transform> for Transform {
+    fn into(self) -> bevy::transform::components::Transform {
+        bevy::transform::components::Transform {
+            translation: self.translation.into(),
+            rotation: self.rotation.into(),
+            scale: self.scale.into(),
         }
     }
 }
@@ -124,4 +146,13 @@ impl PlaneOptions {
             height_segments,
         }
     }
+}
+
+#[wasm_bindgen]
+#[derive(Hash, Eq, PartialEq, Debug)]
+pub enum ToolType {
+    Move,
+    Rotate,
+    Scale,
+    Cursor,
 }

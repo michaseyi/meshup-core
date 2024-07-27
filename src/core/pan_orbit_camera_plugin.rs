@@ -81,7 +81,7 @@ impl Default for PanOrbitSettings {
             scroll_action: Some(PanOrbitAction::Zoom),
             scroll_line_sensitivity: 1.0, // 1 "line" == 16 "pixels of motion"
             scroll_pixel_sensitivity: 1.0 / 16.0,
-            lag_factor: 0.75, // 0.75
+            lag_factor: 0.0, // 0.75
         }
     }
 }
@@ -90,6 +90,9 @@ pub enum PanOrbitAction {
     Orbit,
     Zoom,
 }
+
+#[derive(Component)]
+pub struct PrimaryCamera;
 
 pub struct PanOrbitCameraPlugin;
 
@@ -276,7 +279,8 @@ pub struct PanOrbitCameraUpdate;
 
 impl Plugin for PanOrbitCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.world.spawn(PanOrbitCameraBundle::default());
+        app.world
+            .spawn((PanOrbitCameraBundle::default(), PrimaryCamera));
 
         app.add_systems(
             Update,
