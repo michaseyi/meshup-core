@@ -99,7 +99,7 @@ impl UvSphereOptions {
 }
 #[wasm_bindgen]
 pub struct CubeOptions {
-    size: f32,
+    pub size: f32,
 }
 
 #[wasm_bindgen]
@@ -114,17 +114,17 @@ impl CubeOptions {
 pub struct CylinderOptions {
     pub radius: f32,
     pub height: f32,
-    pub depth: u32,
+    pub segments: u32,
 }
 
 #[wasm_bindgen]
 impl CylinderOptions {
     #[wasm_bindgen(constructor)]
-    pub fn new(radius: f32, height: f32, depth: u32) -> Self {
+    pub fn new(radius: f32, height: f32, segments: u32) -> Self {
         Self {
             radius,
             height,
-            depth,
+            segments,
         }
     }
 }

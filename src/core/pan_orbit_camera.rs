@@ -1,11 +1,9 @@
-use std::f32::{
-    consts::{FRAC_PI_2, PI, TAU},
-    EPSILON,
-};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use bevy::{
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     prelude::*,
+    window::{CursorGrabMode, PrimaryWindow},
 };
 
 // Bundle to spawn our custom camera easily
@@ -24,10 +22,8 @@ pub struct PanOrbitState {
     pub upside_down: bool,
     pub pitch: f32,
     pub yaw: f32,
-    pub orbit_lag: Vec2,
-    pub pan_lag: Vec2,
-    pub scroll_lines_lag: Vec2,
-    pub scroll_pixels_lag: Vec2,
+    pub min_radius: f32,
+    pub max_radius: f32,
 }
 
 /// The configuration of the pan-orbit controller
@@ -49,23 +45,18 @@ pub struct PanOrbitSettings {
     pub scroll_line_sensitivity: f32,
     /// For devices with smooth scrolling, like touchpads
     pub scroll_pixel_sensitivity: f32,
-
-    pub lag_factor: f32,
 }
 
 impl Default for PanOrbitState {
     fn default() -> Self {
         PanOrbitState {
+            max_radius: 10000.0,
+            min_radius: 0.1,
             center: Vec3::ZERO,
             radius: 20.0,
             upside_down: false,
-
             pitch: -0.55196005,
             yaw: -0.4406954,
-            pan_lag: Vec2::ZERO,
-            orbit_lag: Vec2::ZERO,
-            scroll_lines_lag: Vec2::ZERO,
-            scroll_pixels_lag: Vec2::ZERO,
         }
     }
 }
@@ -81,7 +72,6 @@ impl Default for PanOrbitSettings {
             scroll_action: Some(PanOrbitAction::Zoom),
             scroll_line_sensitivity: 1.0, // 1 "line" == 16 "pixels of motion"
             scroll_pixel_sensitivity: 1.0 / 16.0,
-            lag_factor: 0.0, // 0.75
         }
     }
 }
@@ -98,9 +88,11 @@ pub struct PanOrbitCameraPlugin;
 
 impl PanOrbitCameraPlugin {
     fn pan_orbit_camera_controller(
+        mut allow_orbit: Local<bool>,
         mouse: Res<ButtonInput<MouseButton>>,
         mut evr_motion: EventReader<MouseMotion>,
         mut evr_scroll: EventReader<MouseWheel>,
+        mut window: Query<&mut Window, With<PrimaryWindow>>,
         mut q_camera: Query<
             (&PanOrbitSettings, &mut PanOrbitState, &mut Transform),
             With<Camera3d>,
@@ -129,16 +121,20 @@ impl PanOrbitCameraPlugin {
             }
         }
 
+        let mut window = window.single_mut();
+
+        if mouse.just_pressed(MouseButton::Left) {
+            if let Some(cursor_position) = window.cursor_position() {
+                let threshold = 200.0;
+                let (x, y) = (cursor_position.x, cursor_position.y);
+                if x > window.width() - threshold && y < threshold {
+                    *allow_orbit = true;
+                    window.cursor.grab_mode = CursorGrabMode::Confined;
+                }
+            }
+        }
+
         for (settings, mut state, mut transform) in &mut q_camera {
-            let mut total_scroll_lines = total_scroll_lines + state.scroll_lines_lag;
-            let mut total_scroll_pixels = total_scroll_pixels + state.scroll_pixels_lag;
-
-            state.scroll_lines_lag = settings.lag_factor * total_scroll_lines;
-            state.scroll_pixels_lag = settings.lag_factor * total_scroll_pixels;
-
-            total_scroll_lines -= state.scroll_lines_lag;
-            total_scroll_pixels -= state.scroll_pixels_lag;
-
             // Check how much of each thing we need to apply.
             // Accumulate values from motion and scroll,
             // based on our configuration settings.
@@ -148,32 +144,21 @@ impl PanOrbitCameraPlugin {
                 .map(|key| mouse.pressed(key))
                 .unwrap_or(false)
             {
-                let mut total_motion = total_motion + state.pan_lag;
-                state.pan_lag = settings.lag_factor * total_motion;
-                total_motion -= state.pan_lag;
-                total_pan -= total_motion * settings.pan_sensitivity;
-            } else if state.pan_lag.length() > EPSILON {
-                let mut total_motion = state.pan_lag;
-                state.pan_lag = settings.lag_factor * total_motion;
-                total_motion -= state.pan_lag;
                 total_pan -= total_motion * settings.pan_sensitivity;
             }
 
             let mut total_orbit = Vec2::ZERO;
+
             if settings
                 .orbit_key
                 .map(|key| mouse.pressed(key))
                 .unwrap_or(false)
+                && *allow_orbit
             {
-                let mut total_motion = total_motion + state.orbit_lag;
-                state.orbit_lag = settings.lag_factor * total_motion;
-                total_motion -= state.orbit_lag;
                 total_orbit -= (total_motion * Vec2::new(1.0, -1.0)) * settings.orbit_sensitivity;
-            } else if state.orbit_lag.length() > EPSILON {
-                let mut total_motion = state.orbit_lag;
-                state.orbit_lag = settings.lag_factor * total_motion;
-                total_motion -= state.orbit_lag;
-                total_orbit -= (total_motion * Vec2::new(1.0, -1.0)) * settings.orbit_sensitivity;
+            } else {
+                *allow_orbit = false;
+                window.cursor.grab_mode = CursorGrabMode::None;
             }
 
             if settings.scroll_action == Some(PanOrbitAction::Orbit) {
@@ -226,6 +211,7 @@ impl PanOrbitCameraPlugin {
                 // so we compute the exponential of our
                 // accumulated value and multiply by that
                 state.radius *= (-total_zoom.y).exp();
+                state.radius = state.radius.min(state.max_radius).max(state.min_radius);
             }
 
             // To ORBIT, we change our pitch and yaw values

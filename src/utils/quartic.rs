@@ -1,30 +1,32 @@
+use roots::{find_roots_quartic, Roots};
+
 #[derive(Debug, PartialEq)]
 pub enum QuarticRoots {
     None,
-    One(f32),
-    Two(f32, f32),
-    Three(f32, f32, f32),
-    Four(f32, f32, f32, f32),
+    One([f32; 1]),
+    Two([f32; 2]),
+    Three([f32; 3]),
+    Four([f32; 4]),
 }
 
 impl QuarticRoots {
     pub fn max(&self) -> Option<f32> {
         match self {
             QuarticRoots::None => None,
-            QuarticRoots::One(a) => Some(*a),
-            QuarticRoots::Two(a, b) => Some(a.max(*b)),
-            QuarticRoots::Three(a, b, c) => Some(a.max(*b).max(*c)),
-            QuarticRoots::Four(a, b, c, d) => Some(a.max(*b).max(*c).max(*d)),
+            QuarticRoots::One([a]) => Some(*a),
+            QuarticRoots::Two([a, b]) => Some(a.max(*b)),
+            QuarticRoots::Three([a, b, c]) => Some(a.max(*b).max(*c)),
+            QuarticRoots::Four([a, b, c, d]) => Some(a.max(*b).max(*c).max(*d)),
         }
     }
 
     pub fn min(&self) -> Option<f32> {
         match self {
             QuarticRoots::None => None,
-            QuarticRoots::One(a) => Some(*a),
-            QuarticRoots::Two(a, b) => Some(a.min(*b)),
-            QuarticRoots::Three(a, b, c) => Some(a.min(*b).min(*c)),
-            QuarticRoots::Four(a, b, c, d) => Some(a.min(*b).min(*c).min(*d)),
+            QuarticRoots::One([a]) => Some(*a),
+            QuarticRoots::Two([a, b]) => Some(a.min(*b)),
+            QuarticRoots::Three([a, b, c]) => Some(a.min(*b).min(*c)),
+            QuarticRoots::Four([a, b, c, d]) => Some(a.min(*b).min(*c).min(*d)),
         }
     }
 }
@@ -101,10 +103,13 @@ impl QuarticRoots {
 // }
 
 pub fn solve_quartic(a: f32, b: f32, c: f32, d: f32, e: f32) -> QuarticRoots {
-    let j = (2. * c.powi(3)) - (9. * b * c * d) + (27. * b.powi(2) * e) + (27. * a * d.powi(2))
-        - (72. * a * c * e);
-
-    QuarticRoots::None
+    match find_roots_quartic(a as f64, b as f64, c as f64, d as f64, e as f64) {
+        Roots::Four(roots) => QuarticRoots::Four(roots.map(|f| f as f32)),
+        Roots::Three(roots) => QuarticRoots::Three(roots.map(|f| f as f32)),
+        Roots::Two(roots) => QuarticRoots::Two(roots.map(|f| f as f32)),
+        Roots::One(roots) => QuarticRoots::One(roots.map(|f| f as f32)),
+        Roots::No([]) => QuarticRoots::None,
+    }
 }
 
 #[cfg(test)]
@@ -112,12 +117,30 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_solve_quartic() {
-        let roots = solve_quartic(1., -5., -15., 5., 14.);
+    fn test_integer_quartic_roots() {
+        let actual_roots = solve_quartic(1., -5., -15., 5., 14.);
+        let expected_roots = [-2.0, -1.0, 1.0, 7.0];
 
-        match roots {
-            QuarticRoots::Four(a, b, c, d) => {
-                println!("{}, {}, {}, {}", a, b, c, d);
+        match actual_roots {
+            QuarticRoots::Four(roots) => {
+                for (actual, expected) in roots.iter().zip(expected_roots.iter()) {
+                    assert!((actual - expected).abs() < 0.0001);
+                }
+            }
+            _ => panic!(),
+        };
+    }
+
+    #[test]
+    fn test_decimal_quartic_roots() {
+        let actual_roots = solve_quartic(1., -5., -15., 5., 1.);
+        let expected_roots = [-2.318769, -0.142252, 0.431266, 7.029735f32];
+
+        match actual_roots {
+            QuarticRoots::Four(roots) => {
+                for (actual, expected) in roots.iter().zip(expected_roots.iter()) {
+                    assert!((actual - expected).abs() < 0.0001);
+                }
             }
             _ => panic!(),
         };

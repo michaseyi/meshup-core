@@ -8,6 +8,8 @@ crate-type= ["cdylib"]
 
 [dependencies]
 bevy = {version = "0.13.2", default-features=false, features = ["animation", "bevy_asset", "bevy_scene", "bevy_winit", "bevy_core_pipeline", "bevy_pbr", "bevy_gltf", "bevy_render", "bevy_sprite", "bevy_text", "bevy_ui", "png", "hdr", "x11", "bevy_gizmos", "android_shared_stdcxx", "tonemapping_luts", "default_font", "webgl2"]}
+bytemuck = "1.16.3"
 # bevy = {version = "0.13.2", default-features=false, features = ["bevy_asset", "bevy_scene", "bevy_winit", "bevy_core_pipeline", "bevy_pbr", "bevy_render","bevy_text", "bevy_ui", "png", "hdr", "bevy_gizmos", "tonemapping_luts", "default_font", "webgpu"]}
 lox = "0.1.1"
+roots = "0.0.8"
 wasm-bindgen = "0.2.92"

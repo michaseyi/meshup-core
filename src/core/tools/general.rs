@@ -1,20 +1,20 @@
 use core::f32;
-use std::f32::consts;
 
 use bevy::{
-    math::bounding::{Aabb3d, IntersectsVolume, RayCast3d},
+    math::bounding::{Aabb3d, BoundingVolume, RayCast3d},
     prelude::*,
-    window::{CursorGrabMode, PrimaryWindow},
+    window::PrimaryWindow,
 };
 
 use crate::{
     core::{
-        editor_plugin::Focused,
+        dim3::Torus,
+        editor::Focused,
         gizmos::{
-            CustomGizmo, GizmoColors, GizmoPlaneDistance, GizmoScaleToViewportRatio, RotationGizmo,
-            ScaleGizmo, TranslationGizmo,
+            CustomGizmo, GizmoColors, GizmoDataHandles, GizmoPlaneDistance,
+            GizmoScaleToViewportRatio, RotationGizmo, ScaleGizmo, TranslationGizmo,
         },
-        pan_orbit_camera_plugin::{PanOrbitSettings, PanOrbitState, PrimaryCamera},
+        pan_orbit_camera::PrimaryCamera,
     },
     utils,
 };
@@ -52,7 +52,7 @@ impl Translation {
             (With<TranslationGizmo>, Without<Focused>),
         >,
         q_main_camera: Query<
-            (&Camera, &Transform),
+            (&Camera, &Transform, &GlobalTransform),
             (
                 With<PrimaryCamera>,
                 Without<TranslationGizmo>,
@@ -67,7 +67,7 @@ impl Translation {
         colors: Res<GizmoColors>,
     ) {
         let (mut gizmo_visiblity, mut gizmo_transform) = translate_gizmo.single_mut();
-        let (camera, camera_transform) = q_main_camera.single();
+        let (camera, camera_transform, camera_global_transform) = q_main_camera.single();
 
         let Some(mut entity_transform) = focused_entity.iter_mut().nth(0) else {
             *gizmo_visiblity = Visibility::Hidden;
@@ -101,11 +101,8 @@ impl Translation {
         if let Some(prev_action) = &state.active_action {
             curr_action = Some(prev_action.clone());
         } else {
-            let ray = match camera.viewport_to_world(
-                &(GlobalTransform::IDENTITY.mul_transform(*camera_transform)),
-                cursor_position,
-            ) {
-                Some(ray) => RayCast3d::from_ray(ray, 100.),
+            let ray = match camera.viewport_to_world(camera_global_transform, cursor_position) {
+                Some(ray) => RayCast3d::from_ray(ray, 1000.),
                 None => {
                     gizmo_transform.translation = gizmo_origin.clone();
                     return;
@@ -173,6 +170,7 @@ impl Translation {
             };
 
             state.active_action = Some(action);
+
             curr_action = Some(action);
             state.start_position = Some(gizmo_origin);
         }
@@ -203,42 +201,8 @@ impl Translation {
             TranslateAction::Y => Vec3::new(0.0, moves.y, 0.0),
             TranslateAction::Z => Vec3::new(0.0, 0.0, moves.z),
             TranslateAction::XY => Vec3::new(moves.x, moves.y, 0.0),
-            TranslateAction::XZ => {
-                let change = Vec3::new(moves.x, 0.0, moves.z);
-
-                let origin = state.start_position.unwrap();
-
-                gizmo.line(
-                    origin + Direction3d::X * -50.,
-                    origin + Direction3d::X * 50.,
-                    colors.red,
-                );
-                gizmo.line(
-                    origin + Direction3d::Z * -50.,
-                    origin + Direction3d::Z * 50.,
-                    colors.blue,
-                );
-
-                change
-            }
-            TranslateAction::YZ => {
-                let change = Vec3::new(0.0, moves.y, moves.z);
-
-                let origin = state.start_position.unwrap();
-
-                gizmo.line(
-                    origin + Direction3d::Y * -50.,
-                    origin + Direction3d::Y * 50.,
-                    colors.green,
-                );
-                gizmo.line(
-                    origin + Direction3d::Z * -50.,
-                    origin + Direction3d::Z * 50.,
-                    colors.blue,
-                );
-
-                change
-            }
+            TranslateAction::XZ => Vec3::new(moves.x, 0.0, moves.z),
+            TranslateAction::YZ => Vec3::new(0.0, moves.y, moves.z),
             TranslateAction::XYZ => moves,
         };
         entity_transform.translation += translation;
@@ -347,7 +311,7 @@ impl Scale {
                 &(GlobalTransform::IDENTITY.mul_transform(*camera_transform)),
                 cursor_position,
             ) {
-                Some(ray) => RayCast3d::from_ray(ray, 100.),
+                Some(ray) => RayCast3d::from_ray(ray, 1000.),
                 None => {
                     gizmo_transform.translation = gizmo_origin.clone();
                     return;
@@ -466,6 +430,14 @@ impl Scale {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RotateAction {
+    X,
+    Y,
+    Z,
+    CameraFront,
+}
+
 pub struct Rotation;
 
 impl Rotation {
@@ -473,20 +445,21 @@ impl Rotation {
         pixel_scale: Res<GizmoScaleToViewportRatio>,
         mut rotation_gizmzo: Gizmos<RotationGizmo>,
         mut custom_gizmo: Gizmos<CustomGizmo>,
-        q_main_camera: Query<(&Camera, &Transform), (With<PrimaryCamera>, Without<Focused>)>,
+        q_main_camera: Query<
+            (&Camera, &Transform, &GlobalTransform),
+            (With<PrimaryCamera>, Without<Focused>),
+        >,
         gizmo_plane_distance: Res<GizmoPlaneDistance>,
         window: Query<&Window, With<PrimaryWindow>>,
         mut focused_entity: Query<&mut Transform, With<Focused>>,
         colors: Res<GizmoColors>,
+        mouse: Res<ButtonInput<MouseButton>>,
     ) {
         let Some(mut entity_transform) = focused_entity.iter_mut().nth(0) else {
             return;
         };
 
-        let (camera, camera_transform) = q_main_camera.single();
-
-        let (pitch, yaw, roll) =
-            utils::projection::compute_orientation_angles(-Vec3::from(camera_transform.forward()));
+        let (camera, camera_transform, g) = q_main_camera.single();
 
         let origin = utils::projection::project_to_plane(
             camera_transform.translation,
@@ -494,39 +467,103 @@ impl Rotation {
             entity_transform.translation,
             gizmo_plane_distance.0,
         );
+        let thickness = 3. * pixel_scale.0;
 
-        rotation_gizmzo.arc_3d(
-            f32::consts::PI,
-            80. * pixel_scale.0,
-            origin,
-            Quat::from_rotation_y(f32::consts::PI).mul_quat(Quat::from_rotation_y(yaw)),
-            colors.green,
-        );
-        rotation_gizmzo.arc_3d(
-            f32::consts::PI,
-            80. * pixel_scale.0,
-            origin,
-            Quat::from_rotation_y(f32::consts::PI)
-                .mul_quat(Quat::from_rotation_z(f32::consts::FRAC_PI_2))
-                .mul_quat(Quat::from_rotation_z(roll)),
-            colors.red,
-        );
-        rotation_gizmzo.arc_3d(
-            f32::consts::PI,
-            80. * pixel_scale.0,
-            origin,
-            Quat::from_rotation_y(f32::consts::PI)
-                .mul_quat(Quat::from_rotation_x(-f32::consts::FRAC_PI_2))
-                .mul_quat(Quat::from_rotation_x(pitch)),
-            colors.blue,
-        );
+        let rotation_gizmos = [
+            (Quat::default(), colors.green, RotateAction::Y),
+            (
+                Quat::from_rotation_arc(Vec3::Y, Vec3::X),
+                colors.red,
+                RotateAction::X,
+            ),
+            (
+                Quat::from_rotation_arc(Vec3::Y, Vec3::Z),
+                colors.blue,
+                RotateAction::Z,
+            ),
+        ]
+        .map(|(rotation, color, action)| {
+            (
+                rotation,
+                color,
+                Torus::new(80. * pixel_scale.0, thickness, origin, rotation),
+                action,
+            )
+        });
 
-        custom_gizmo.circle(
-            origin,
-            camera_transform.forward(),
+        let Some(cursor_position) = window.single().cursor_position() else {
+            return;
+        };
+
+        let ray = match camera.viewport_to_world(
+            // &(GlobalTransform::IDENTITY.mul_transform(*camera_transform)),
+            g,
+            cursor_position,
+        ) {
+            Some(ray) => RayCast3d::from_ray(ray, 1000.),
+            None => return,
+        };
+        let mut closest_t = f32::MAX;
+        let mut closest_t_action = None;
+
+        for (_, _, torus, action) in rotation_gizmos.iter() {
+            let Some(t) = torus.intersets_ray_at(&ray) else {
+                continue;
+            };
+
+            if t < closest_t {
+                closest_t = t;
+                closest_t_action = Some(action.clone());
+            }
+        }
+        let camera_aligned_torus: Torus = Torus::new(
             90. * pixel_scale.0,
-            Color::WHITE,
+            thickness,
+            origin,
+            Quat::from_rotation_arc(Vec3::Y, camera_transform.back().into()),
         );
 
+        match camera_aligned_torus.intersets_ray_at(&ray) {
+            Some(t) => {
+                if t < closest_t {
+                    closest_t = t;
+                    closest_t_action = Some(RotateAction::CameraFront);
+                }
+            }
+            None => {}
+        }
+
+        custom_gizmo.arc_3d(
+            f32::consts::PI * 2.,
+            90. * pixel_scale.0,
+            origin,
+            camera_aligned_torus.orientation,
+            if closest_t_action == Some(RotateAction::CameraFront) {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            },
+        );
+
+        for (rotation, color, torus, action) in rotation_gizmos.iter() {
+            let color = match closest_t_action {
+                Some(closest_t_action) => {
+                    if closest_t_action != *action {
+                        color.clone()
+                    } else {
+                        Color::BLACK
+                    }
+                }
+                _ => color.clone(),
+            };
+
+            rotation_gizmzo.arc_3d(
+                f32::consts::PI * 2.,
+                torus.ring_radius,
+                torus.position,
+                rotation.clone(),
+                color,
+            );
+        }
     }
 }

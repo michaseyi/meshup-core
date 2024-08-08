@@ -8,7 +8,7 @@ use bevy::{
 
 use super::{
     dim3::Cone,
-    pan_orbit_camera_plugin::{PanOrbitCameraUpdate, PrimaryCamera},
+    pan_orbit_camera::{PanOrbitCameraUpdate, PrimaryCamera},
 };
 
 #[derive(Component)]
@@ -30,12 +30,12 @@ pub struct GizmoPlaneDistance(pub f32);
 
 impl Default for GizmoPlaneDistance {
     fn default() -> Self {
-        Self(5.0)
+        Self(100.0)
     }
 }
 
 #[derive(Resource, Default)]
-struct GizmoDataHandles {
+pub struct GizmoDataHandles {
     cube_mesh: Handle<Mesh>,
     cylinder_mesh: Handle<Mesh>,
     plane_mesh: Handle<Mesh>,
@@ -69,11 +69,11 @@ impl Default for GizmoColors {
     fn default() -> Self {
         Self {
             red: Color::rgb_u8(255, 107, 107),
-            green: Color::rgb_u8(107, 255, 107),
+            green: Color::rgb_u8(120, 255, 120),
             blue: Color::rgb_u8(107, 170, 255),
             dark_red: Color::rgb_u8(255, 30, 30),
-            dark_green: Color::rgb_u8(30, 255, 30),
-            dark_blue: Color::rgb_u8(30, 30, 255),
+            dark_green: Color::rgb_u8(60, 255, 60),
+            dark_blue: Color::rgb_u8(60, 60, 255),
         }
     }
 }

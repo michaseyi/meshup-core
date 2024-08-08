@@ -1,10 +1,9 @@
-mod bvh;
-pub mod editor_plugin;
+pub mod editable_mesh;
+pub mod editor;
 mod fps;
 mod gizmos;
-mod grid_plugin;
-mod mesh;
-mod pan_orbit_camera_plugin;
+pub mod grid;
+mod pan_orbit_camera;
 
 mod dim3;
 pub mod tools;

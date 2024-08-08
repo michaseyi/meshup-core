@@ -79,6 +79,7 @@ impl ConeMeshBuilder {
             indices.push(i + 2);
             indices.push(next);
         }
+
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
         mesh.insert_indices(Indices::U32(indices));
 
@@ -126,9 +127,9 @@ impl Torus {
     }
 
     /// Reference: http://cosinekitty.com/raytrace/chapter13_torus.html
-    pub fn intersets_ray_at(&self, ray: &RayCast3d) -> Option<Vec3> {
-        let d = ray.ray.origin;
-        let e: Vec3 = ray.ray.direction.into();
+    pub fn intersets_ray_at(&self, ray: &RayCast3d) -> Option<f32> {
+        let d = self.orientation * (ray.ray.origin - self.position);
+        let e: Vec3 = self.orientation * Vec3::from(ray.ray.direction);
         let a = self.ring_radius;
         let b = self.ring_thickness;
 
@@ -153,12 +154,37 @@ impl Torus {
 
         let roots = utils::quartic::solve_quartic(a4, a3, a2, a1, a0);
 
-        match roots.min() {
+        use utils::quartic::QuarticRoots;
+
+        let closest_t = match roots {
+            QuarticRoots::Four(roots) => roots
+                .into_iter()
+                .filter(|t| t.is_sign_positive())
+                .reduce(f32::min),
+            QuarticRoots::Three(roots) => roots
+                .into_iter()
+                .filter(|t| t.is_sign_positive())
+                .reduce(f32::min),
+            QuarticRoots::Two(roots) => roots
+                .into_iter()
+                .filter(|t| t.is_sign_positive())
+                .reduce(f32::min),
+            QuarticRoots::One(roots) => {
+                if roots[0].is_sign_positive() {
+                    Some(roots[0])
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        match closest_t {
             Some(t) => {
                 if t > ray.max {
                     return None;
                 }
-                Some(d + e * t)
+                Some(t)
             }
             None => None,
         }
@@ -168,29 +194,160 @@ impl Torus {
     }
 }
 
+pub struct Triangle3d {
+    pub vertices: [Vec3; 3],
+}
+
+impl Triangle3d {
+    pub fn new(vertices: [Vec3; 3]) -> Self {
+        Self { vertices }
+    }
+
+    pub fn intersects_ray_at(&self, ray: &RayCast3d) -> Option<f32> {
+        let edge1 = self.vertices[1] - self.vertices[0];
+        let edge2 = self.vertices[2] - self.vertices[0];
+        let h = ray.ray.direction.cross(edge2);
+        let a = edge1.dot(h);
+
+        if a > -0.00001 && a < 0.00001 {
+            return None;
+        }
+
+        let f = 1.0 / a;
+        let s = ray.ray.origin - self.vertices[0];
+        let u = f * s.dot(h);
+
+        if u < 0.0 || u > 1.0 {
+            return None;
+        }
+
+        let q = s.cross(edge1);
+        let v = f * ray.ray.direction.dot(q);
+
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+
+        let t = f * edge2.dot(q);
+
+        if t > 0.00001 {
+            return Some(t);
+        }
+
+        None
+    }
+}
+
+/// Input vertices must be in counter-clockwise order.
+pub fn ray_intersects_convex_plane_at(
+    ray: &RayCast3d,
+    transform: &Transform,
+    vertices: &[Vec3],
+) -> Option<f32> {
+    let first = vertices[0];
+    for triangle in vertices[1..].windows(2).map(|vertices| {
+        Triangle3d::new([
+            first.clone() * transform.scale + transform.translation,
+            vertices[0] * transform.scale + transform.translation,
+            vertices[1] * transform.scale + transform.translation,
+        ])
+    }) {
+        let result = triangle.intersects_ray_at(ray);
+
+        if let Some(t) = result {
+            if t < ray.max {
+                return Some(t);
+            } else {
+                return None;
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    use bevy::math::Ray3d;
+
     use super::*;
+    use core::f32;
+
     #[test]
-    fn test_torus_creation() {
-        let torus = Torus::new(1.0, 0.5, Vec3::ZERO, Quat::IDENTITY);
-        assert_eq!(torus.ring_radius, 1.0);
-        assert_eq!(torus.ring_thickness, 0.5);
-        assert_eq!(torus.position, Vec3::ZERO);
-        assert_eq!(torus.orientation, Quat::IDENTITY);
+    fn test_ray_intersect_convex_plane() {
+        let vertices = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+
+        let ray = RayCast3d::from_ray(
+            Ray3d::new(Vec3::new(0.5, 0.5, 1.0), Vec3::new(0.0, 0.0, -1.0)),
+            1000.0,
+        );
+
+        let transform = Transform::IDENTITY;
+
+        assert_eq!(
+            ray_intersects_convex_plane_at(&ray, &transform, &vertices),
+            Some(1.0)
+        );
+
+        let ray = RayCast3d::from_ray(
+            Ray3d::new(Vec3::new(0.5, -0.5, 1.0), Vec3::new(0.0, 0.0, -1.0)),
+            1000.0,
+        );
+        assert_eq!(
+            ray_intersects_convex_plane_at(&ray, &transform, &vertices),
+            None
+        );
     }
 
     #[test]
-    fn test_torus_ray_intersection_in_default_orientation() {
+    fn test_default_orientation_torus_ray_intersection() {
         let torus = Torus::new(1.0, 0.5, Vec3::ZERO, Quat::IDENTITY);
         let ray = RayCast3d::from_ray(
             Ray3d {
-                origin: Vec3::new(0.0, 0.0, 2.0),
+                origin: Vec3::new(0.0, 0.0, 0.0),
                 direction: Direction3d::new(Vec3::new(0.0, 0.0, -1.0)).unwrap(),
             },
             1000.,
         );
         assert!(torus.intersects_ray(&ray));
-        assert_eq!(torus.intersets_ray_at(&ray), Some(Vec3::new(0.0, 0.0, 1.5)));
+        assert_eq!(torus.intersets_ray_at(&ray), Some(0.5));
+    }
+
+    #[test]
+    fn test_non_default_position_torus_ray_intersection() {
+        let torus = Torus::new(1.0, 0.5, Vec3::new(0.0, 0.0, -10.0), Quat::IDENTITY);
+        let ray = RayCast3d::from_ray(
+            Ray3d {
+                origin: Vec3::new(0.0, 0.0, 0.0),
+                direction: Direction3d::new(Vec3::new(0.0, 0.0, -1.0)).unwrap(),
+            },
+            1000.,
+        );
+        assert!(torus.intersects_ray(&ray));
+        assert_eq!(torus.intersets_ray_at(&ray), Some(8.5));
+    }
+
+    #[test]
+    fn test_non_default_orientation_torus_ray_intersection() {
+        let torus = Torus::new(
+            1.0,
+            0.5,
+            Vec3::ZERO,
+            Quat::from_rotation_z(f32::consts::FRAC_PI_2),
+        );
+        let ray = RayCast3d::from_ray(
+            Ray3d {
+                origin: Vec3::new(0.0, 0.0, 0.0),
+                direction: Direction3d::new(Vec3::new(0.0, 1.0, 0.0)).unwrap(),
+            },
+            1000.,
+        );
+        assert!(torus.intersects_ray(&ray));
+        assert_eq!(torus.intersets_ray_at(&ray), Some(0.5));
     }
 }

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use wasm_bindgen::prelude::*;
 
-use crate::core::editor_plugin::External;
+use crate::core::editor::UserSpace;
 
 #[wasm_bindgen]
 extern "C" {
@@ -18,7 +18,7 @@ impl Plugin for EventPlugin {
 }
 
 impl EventPlugin {
-    fn transform_change_detection(query: Query<Entity, (With<External>, Changed<Transform>)>) {
+    fn transform_change_detection(query: Query<Entity, (With<UserSpace>, Changed<Transform>)>) {
         for c in query.iter() {
             entity_transform_update(c.index());
         }
