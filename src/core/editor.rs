@@ -1,32 +1,24 @@
-use std::borrow::BorrowMut;
-
 use bevy::{
-    ecs::system::SystemId,
-    math::bounding::{
-        Aabb3d, AabbCast3d, BoundingCircle, BoundingCircleCast, BoundingVolume, IntersectsVolume,
-        RayCast3d,
-    },
-    pbr::wireframe::{Wireframe, WireframePlugin},
-    prelude::*,
-    render::{primitives::Aabb, view::RenderLayers},
-    utils::{HashMap, HashSet},
-    window::{CompositeAlphaMode, PrimaryWindow, WindowResolution},
-    winit::WinitSettings,
+    ecs::system::SystemId, prelude::*, render::view::RenderLayers, utils::HashMap,
+    window::WindowResolution, winit::WinitSettings,
 };
-use lox::{algo::bounding::BoundingBox, core::Mesh as LoxMesh, Handle as LoxHandle};
 
-use crate::binding::transport::ToolType;
+use bevy_obj::ObjPlugin;
+use lox::{core::Mesh as LoxMesh, Handle as LoxHandle};
+
+use crate::utils;
 
 use super::{
     editable_mesh::{
-        bvh::{bvh_debug_system, BoundingVolumeHierarchy},
-        ActiveEdges, EditableMesh, EditableMeshBundle,
+        bvh::bvh_debug_system, ActiveEdges, EditableMesh, EditableMeshBundle, EditableMeshPlugin,
     },
     fps::FpsPlugin,
-    gizmos::CustomGizmoPlugin,
+    gizmos::{CustomGizmoPlugin, GizmoPlaneDistance, GizmoScaleToViewportRatio},
     grid::GridPlugin,
+    highlight::HighlightPlugin,
+    interaction::{InteractionPlugin, InteractionSet},
     pan_orbit_camera::{PanOrbitCameraPlugin, PanOrbitCameraUpdate, PrimaryCamera},
-    tools::{self, ToolSet},
+    tools::{self, ToolSet, ToolType},
 };
 
 pub struct EditorPlugin {
@@ -82,30 +74,36 @@ impl Plugin for EditorPlugin {
             PanOrbitCameraPlugin,
             CustomGizmoPlugin,
             GridPlugin,
+            EditableMeshPlugin,
+            InteractionPlugin,
+            // HighlightPlugin::<StandardMaterial>::default(),
+            ObjPlugin,
         ))
         .insert_resource(WinitSettings::desktop_app())
         .insert_resource(ActiveTool::default())
         .insert_resource(Tools::default())
         .insert_resource(Cursor3d::default())
         .insert_resource(ClearColor(Color::rgb_u8(63, 63, 63)))
-        .add_systems(Startup, Self::populate_scene)
+        .add_systems(Startup, Self::init_default_scene)
         .add_systems(
             Update,
             (
-                Self::handle_interaction,
-                // Self::wireframe_focused,
-                // bvh_debug_system,
+                Self::wireframe_focused,
+                // bvh_debug_system
             )
                 .after(ToolSet::Update),
         )
         .add_systems(
             Update,
-            (
-                Self::sync_light_with_camera,
-                Self::run_tool.in_set(ToolSet::Update),
-            )
-                .after(PanOrbitCameraUpdate),
+            (Self::sync_light_with_camera, Self::draw_cursor_3d).after(PanOrbitCameraUpdate),
+        )
+        .add_systems(
+            Update,
+            Self::run_active_tool
+                .in_set(ToolSet::Update)
+                .after(InteractionSet::ActivesUpdate),
         );
+
         Self::init_data(&mut app.world);
         Self::register_tools(&mut app.world);
     }
@@ -127,7 +125,7 @@ impl EditorPlugin {
         world.insert_resource(ViewportMaterial(viewport_material));
     }
 
-    fn run_tool(active_tool: Res<ActiveTool>, mut commands: Commands) {
+    fn run_active_tool(active_tool: Res<ActiveTool>, mut commands: Commands) {
         let Some(tool) = &active_tool.0 else {
             return;
         };
@@ -181,8 +179,48 @@ impl EditorPlugin {
             },
         );
     }
+    fn draw_cursor_3d(
+        cursor: Res<Cursor3d>,
+        mut gizmo: Gizmos,
+        camera: Query<&Transform, With<PrimaryCamera>>,
+        pixel_scale: Res<GizmoScaleToViewportRatio>,
+        plane_distance: Res<GizmoPlaneDistance>,
+    ) {
+        let camera = camera.single();
 
-    fn populate_scene(
+        let forward: Vec3 = camera.forward().into();
+        let cursor_position = utils::projection::project_to_plane(
+            camera.translation,
+            forward,
+            cursor.position,
+            plane_distance.0,
+        );
+
+        let ring_radius = 8.0 * pixel_scale.0;
+        let axis_height = 15.0 * pixel_scale.0;
+        let offset = 5.0 * pixel_scale.0;
+
+        gizmo.circle(
+            cursor_position,
+            forward.try_into().unwrap(),
+            ring_radius,
+            Color::WHITE,
+        );
+
+        for axis in [Direction3d::X, Direction3d::Y, Direction3d::Z] {
+            gizmo.line(
+                cursor_position + axis * offset,
+                cursor_position + axis * (axis_height + offset),
+                Color::BLACK,
+            );
+            gizmo.line(
+                cursor_position - axis * offset,
+                cursor_position - axis * (axis_height + offset),
+                Color::BLACK,
+            );
+        }
+    }
+    fn init_default_scene(
         mut ambient_light: ResMut<AmbientLight>,
         mut commands: Commands,
         mut meshes: ResMut<Assets<Mesh>>,
@@ -190,8 +228,10 @@ impl EditorPlugin {
         mut gizmo_config: ResMut<GizmoConfigStore>,
     ) {
         let (config, _) = gizmo_config.config_mut::<DefaultGizmoConfigGroup>();
-        config.depth_bias = -0.001;
-        config.line_width = 1.2;
+        // config.depth_bias = -0.001;
+        config.line_width = 1.5;
+        config.depth_bias = 0.2;
+        // config.line_width = 3.0;
 
         ambient_light.brightness = 250.0;
 
@@ -199,18 +239,16 @@ impl EditorPlugin {
             EditableMeshBundle {
                 material: viewport_material.0.clone(),
                 ..EditableMeshBundle::from_mesh(
-                    Sphere::new(1.0)
-                        .mesh()
-                        .ico(5)
+                    bevy_obj::load_obj_from_bytes(include_bytes!("../assets/mesh/cat.obj"))
                         .unwrap()
+                        .transformed_by(Transform::from_scale(Vec3::splat(0.1)))
                         .with_duplicated_vertices()
                         .with_computed_flat_normals(),
                     &mut meshes,
                 )
             },
-            Name::from("Ico Sphere"),
+            Name::from("Cat"),
             UserSpace,
-            Focused,
         ));
 
         commands.spawn((
@@ -263,89 +301,9 @@ impl EditorPlugin {
                 if active_edges.contains(&edge.handle().idx()) {
                     Color::WHITE
                 } else {
-                    Color::BLACK
+                    Color::ORANGE_RED
                 },
             );
-        }
-    }
-    fn handle_interaction(
-        mut commands: Commands,
-        focused: Query<
-            (
-                &BoundingVolumeHierarchy,
-                &Transform,
-                &Name,
-                &EditableMesh,
-                Entity,
-            ),
-            With<Focused>,
-        >,
-        query: Query<
-            (
-                &BoundingVolumeHierarchy,
-                &Transform,
-                &Name,
-                &EditableMesh,
-                Entity,
-            ),
-            Without<Focused>,
-        >,
-        mouse: Res<ButtonInput<MouseButton>>,
-        window: Query<&Window, With<PrimaryWindow>>,
-        camera: Query<(&Camera, &GlobalTransform), With<PrimaryCamera>>,
-    ) {
-        if !mouse.just_pressed(MouseButton::Left) {
-            return;
-        }
-
-        let window = window.single();
-
-        let Some(cursor_position) = window.cursor_position() else {
-            return;
-        };
-
-        let (camera, global_transform) = camera.single();
-
-        let Some(ray) = camera.viewport_to_world(global_transform, cursor_position) else {
-            return;
-        };
-
-        let ray_cast = RayCast3d::from_ray(ray, 1000.0);
-
-        let focused_entity = focused.get_single();
-
-        let (mut closest_t, mut closest_entity) = (f32::MAX, None);
-
-        for (bvh, transform, name, mesh, entity) in query.iter().chain(focused.iter()) {
-            if let Some((face_handle, t)) = bvh.intersects_ray_at(&ray_cast, transform, mesh) {
-                info!(
-                    "Intersection hit {:?} {:?}, at face {:?} at point {:?}",
-                    name,
-                    entity,
-                    face_handle,
-                    ray_cast.ray.get_point(t)
-                );
-
-                if t < closest_t {
-                    closest_t = t;
-                    closest_entity = Some(entity);
-                }
-            }
-        }
-
-        if let Some(entity) = closest_entity {
-            commands.entity(entity).insert(Focused);
-        }
-
-        // if let (Ok((_, _, _, entity)), None) = (&focused_entity, &closest_entity) {
-        //     commands.entity(entity.clone()).remove::<Focused>();
-        // }
-
-        if let (Ok((_, _, _, _, entity)), Some(closest_entity)) = (&focused_entity, &closest_entity)
-        {
-            if entity != closest_entity {
-                commands.entity(entity.clone()).remove::<Focused>();
-            }
         }
     }
 }

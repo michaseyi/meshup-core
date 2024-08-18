@@ -1,5 +1,7 @@
 use bevy::{ecs::system::SystemId, prelude::SystemSet};
+use wasm_bindgen::prelude::*;
 pub mod general;
+pub mod brush;
 
 pub struct Tool {
     pub startup_system: SystemId,
@@ -12,4 +14,13 @@ pub enum ToolSet {
     Startup,
     Update,
     Shutdown,
+}
+
+#[wasm_bindgen]
+#[derive(Hash, Eq, PartialEq, Debug)]
+pub enum ToolType {
+    Move,
+    Rotate,
+    Scale,
+    Cursor,
 }

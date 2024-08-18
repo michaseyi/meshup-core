@@ -148,11 +148,13 @@ impl PlaneOptions {
     }
 }
 
+
 #[wasm_bindgen]
 #[derive(Hash, Eq, PartialEq, Debug)]
-pub enum ToolType {
-    Move,
-    Rotate,
-    Scale,
-    Cursor,
+pub enum EntityEvent {
+    TransformChanged,
+    VisibilityChanged,
+    ParentChanged,
+    ChildrenChanged,
+    Despawned,
 }

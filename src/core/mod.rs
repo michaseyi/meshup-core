@@ -6,4 +6,6 @@ pub mod grid;
 mod pan_orbit_camera;
 
 mod dim3;
+pub mod interaction;
 pub mod tools;
+pub mod highlight;

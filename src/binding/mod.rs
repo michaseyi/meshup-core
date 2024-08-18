@@ -1,11 +1,10 @@
 use bevy::{
-    ecs::system::SystemParam, input::mouse::MouseMotion, prelude::*, window::RequestRedraw,
-    winit::EventLoopProxy,
+    ecs::query::QuerySingleError, prelude::*, window::RequestRedraw, winit::EventLoopProxy,
 };
 use events::EventPlugin;
 use std::{
     ptr,
-    sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use unsafe_world::UnsafeWorld;
 use wasm_bindgen::prelude::*;
@@ -14,6 +13,9 @@ use crate::core::{
     editable_mesh::EditableMeshBundle,
     editor::{ActiveTool, Focused, Tools, UserSpace, ViewportMaterial},
     grid::Grid3d,
+    highlight::Highlight,
+    interaction::InteractionMode,
+    tools::ToolType,
 };
 
 use super::core::editor::EditorPlugin;
@@ -306,7 +308,7 @@ pub fn set_entity_transform(entity_index: u32, transport_transform: &transport::
 }
 
 #[wasm_bindgen]
-pub fn set_active_tool(tool_type: transport::ToolType) {
+pub fn set_active_tool(tool_type: ToolType) {
     let Some(mut world) = world_mut() else {
         return;
     };
@@ -445,4 +447,146 @@ pub fn get_active_entity() -> i32 {
         Ok(entity) => entity.index() as i32,
         Err(_) => -1,
     }
+}
+
+#[wasm_bindgen]
+pub fn is_entity_focused(entity_index: u32) -> bool {
+    let Some(world) = world() else {
+        return false;
+    };
+
+    let Some(entity) = world.get_entity(Entity::from_raw(entity_index)) else {
+        return false;
+    };
+
+    entity.get::<Focused>().is_some()
+}
+
+#[wasm_bindgen]
+pub fn focus_entity(entity_index: u32) {
+    let Some(mut world) = world_mut() else {
+        return;
+    };
+
+    let mut query = world.query_filtered::<Entity, With<Focused>>();
+
+    match query.get_single(&world) {
+        Ok(entity) => {
+            let Some(mut entity_ref) = world.get_entity_mut(entity) else {
+                return;
+            };
+
+            entity_ref.remove::<Focused>();
+        }
+        _ => {}
+    }
+
+    let Some(mut entity) = world.get_entity_mut(Entity::from_raw(entity_index)) else {
+        return;
+    };
+
+    entity.insert(Focused);
+
+    wakeup_world(&world);
+}
+
+#[wasm_bindgen]
+pub fn unfocus() {
+    let Some(mut world) = world_mut() else {
+        return;
+    };
+
+    let mut query = world.query_filtered::<Entity, With<Focused>>();
+
+    match query.get_single(&world) {
+        Ok(entity) => {
+            let Some(mut entity_ref) = world.get_entity_mut(entity) else {
+                return;
+            };
+
+            entity_ref.remove::<Focused>();
+        }
+        _ => {}
+    }
+
+    wakeup_world(&world);
+}
+
+#[wasm_bindgen]
+pub fn set_interaction_mode(mode: InteractionMode) {
+    let Some(mut world) = world_mut() else {
+        return;
+    };
+
+    // For interaction modes asides InteractionMode::Object, there must be a focused enitity for the mode to be valid.
+    let mut focused_entity = world.query_filtered::<(), With<Focused>>();
+
+    match &mode {
+        InteractionMode::Object => {}
+        _ => {
+            if let Err(_) = focused_entity.get_single(&world) {
+                return;
+            }
+            // focused_entity.get_single(&world)
+            // .expect("Setting interaction mode to any other than InteractionMode::Object requires a focused entity, as interaction operations will be done relative to that entity");
+        }
+    };
+
+    let mut interaction_mode = world.get_resource_mut::<InteractionMode>().unwrap();
+
+    *interaction_mode = mode;
+
+    wakeup_world(&world);
+}
+
+#[wasm_bindgen]
+pub fn get_interaction_mode() -> InteractionMode {
+    let world = world().unwrap();
+
+    let interaction_mode = world.get_resource::<InteractionMode>().unwrap();
+
+    interaction_mode.clone()
+}
+
+#[wasm_bindgen]
+pub fn highlight_entity(entity_index: u32) {
+    let Some(mut world) = world_mut() else {
+        return;
+    };
+
+    let Some(mut entity) = world.get_entity_mut(Entity::from_raw(entity_index)) else {
+        return;
+    };
+
+    entity.insert(Highlight);
+
+    wakeup_world(&world);
+}
+
+#[wasm_bindgen]
+pub fn unhighlight_entity(entity_index: u32) {
+    let Some(mut world) = world_mut() else {
+        return;
+    };
+
+    let Some(mut entity) = world.get_entity_mut(Entity::from_raw(entity_index)) else {
+        return;
+    };
+
+    entity.remove::<Highlight>();
+
+    wakeup_world(&world);
+}
+
+#[wasm_bindgen]
+pub fn is_highlighted(entity_index: u32) -> bool {
+    let Some(world) = world() else {
+        return false;
+    };
+
+    let Some(entity) = world.get_entity(Entity::from_raw(entity_index)) else {
+        return false;
+    };
+
+    entity.get::<Highlight>().is_some()
 }

@@ -17,6 +17,18 @@ use lox::{
     FaceHandle, Handle as LoxHandle, VertexHandle,
 };
 
+use super::{
+    editor::Focused,
+    interaction::{InteractionCache, InteractionSet},
+};
+
+#[derive(Resource, Copy, Clone, Debug)]
+pub enum SelectMode {
+    Faces,
+    Edges,
+    Vertices,
+}
+
 #[derive(Component, Deref, DerefMut, Default)]
 pub struct ActiveVertices(pub HashSet<u32>);
 
@@ -170,6 +182,52 @@ impl From<&Mesh> for EditableMesh {
         }
 
         editable_mesh
+    }
+}
+
+pub struct EditableMeshPlugin;
+
+impl Plugin for EditableMeshPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(SelectMode::Vertices).add_systems(
+            Update,
+            Self::update_active
+                .in_set(InteractionSet::ActivesUpdate)
+                .after(InteractionSet::IntersectionTest),
+        );
+    }
+}
+
+impl EditableMeshPlugin {
+    fn update_active(
+        select_mode: Res<SelectMode>,
+        mut focused: Query<
+            (
+                &EditableMesh,
+                &Transform,
+                &InteractionCache,
+                &mut ActiveVertices,
+                &mut ActiveFaces,
+                &mut ActiveEdges,
+            ),
+            With<Focused>,
+        >,
+    ) {
+        let Ok((
+            editable_mesh,
+            transform,
+            intersection_cache,
+            mut active_vertices,
+            mut active_faces,
+            mut active_edges,
+        )) = focused.get_single_mut()
+        else {
+            return;
+        };
+        match *select_mode {
+            SelectMode::Vertices => {}
+            _ => {}
+        };
     }
 }
 

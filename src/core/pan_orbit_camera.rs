@@ -50,7 +50,7 @@ pub struct PanOrbitSettings {
 impl Default for PanOrbitState {
     fn default() -> Self {
         PanOrbitState {
-            max_radius: 10000.0,
+            max_radius: 1000.0,
             min_radius: 0.1,
             center: Vec3::ZERO,
             radius: 20.0,

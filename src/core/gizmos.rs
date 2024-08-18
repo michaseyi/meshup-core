@@ -162,7 +162,7 @@ impl CustomGizmoPlugin {
         gizmo_data_handles.red_material = materials.add(StandardMaterial {
             base_color: gizmo_colors.red,
             double_sided: true,
-            unlit: true,
+            // unlit: true,
             cull_mode: None,
             ..default()
         });
@@ -170,7 +170,7 @@ impl CustomGizmoPlugin {
         gizmo_data_handles.green_material = materials.add(StandardMaterial {
             base_color: gizmo_colors.green,
             double_sided: true,
-            unlit: true,
+            // unlit: true,
             cull_mode: None,
             ..default()
         });
@@ -178,7 +178,7 @@ impl CustomGizmoPlugin {
         gizmo_data_handles.blue_material = materials.add(StandardMaterial {
             base_color: gizmo_colors.blue,
             cull_mode: None,
-            unlit: true,
+            // unlit: true,
             double_sided: true,
             ..default()
         });

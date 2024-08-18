@@ -1,22 +1,21 @@
-use std::num::{NonZero, NonZeroU32};
-
 use bevy::{
     core_pipeline::core_3d::Transparent3d,
     ecs::{
-        query::{QueryItem, QuerySingleError},
+        query::QueryItem,
         system::lifetimeless::{Read, SRes},
     },
+    math::{
+        bounding::{Aabb3d, Bounded3d, BoundingVolume},
+        Vec3A,
+    },
     pbr::{
-        ExtendedMaterial, MeshPipeline, MeshPipelineKey, MeshUniform, RenderMeshInstances,
-        SetMeshBindGroup, SetMeshViewBindGroup,
+        MeshPipeline, MeshPipelineKey, RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup,
     },
     prelude::*,
     render::{
-        batching::GetBatchData,
         camera::CameraProjection,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         mesh::{GpuBufferInfo, Indices, PrimitiveTopology},
-        primitives::Frustum,
         render_asset::{RenderAssetUsages, RenderAssets},
         render_phase::{
             AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult,
@@ -25,19 +24,20 @@ use bevy::{
         render_resource::{
             AsBindGroup, BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry,
             BindingType, Buffer, BufferBindingType, BufferInitDescriptor, BufferUsages,
-            GpuArrayBuffer, PipelineCache, ShaderRef, ShaderStage, ShaderStages, ShaderType,
-            SpecializedMeshPipeline, SpecializedMeshPipelines, UniformBuffer, VertexAttribute,
-            VertexBufferLayout, VertexFormat, VertexStepMode,
+            PipelineCache, ShaderStages, ShaderType, SpecializedMeshPipeline,
+            SpecializedMeshPipelines, UniformBuffer, VertexAttribute, VertexBufferLayout,
+            VertexFormat, VertexStepMode,
         },
         renderer::{RenderDevice, RenderQueue},
         view::{ExtractedView, NoFrustumCulling},
         Render, RenderApp, RenderSet,
     },
-    utils::nonmax::NonMaxU32,
 };
 use bytemuck::{Pod, Zeroable};
 
-use super::pan_orbit_camera::{PanOrbitState, PrimaryCamera};
+use crate::utils;
+
+use super::pan_orbit_camera::{PanOrbitCameraUpdate, PanOrbitState, PrimaryCamera};
 
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 #[repr(C)]
@@ -72,7 +72,7 @@ pub struct GridPlugin;
 
 impl ExtractComponent for PrimaryCamera {
     type QueryData = ();
-    type QueryFilter = With<PrimaryCamera>;
+    type QueryFilter = With<Self>;
     type Out = Self;
 
     fn extract_component(_item: QueryItem<'_, Self::QueryData>) -> Option<Self> {
@@ -84,19 +84,16 @@ impl Plugin for GridPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractComponentPlugin::<GridInstances>::default())
             .add_plugins(ExtractComponentPlugin::<PrimaryCamera>::default())
-            .add_systems(Update, Self::update)
-            .add_systems(Startup, Self::setup_main_world)
+            .add_systems(Update, update_grid.after(PanOrbitCameraUpdate))
+            .add_systems(Startup, setup_grid)
             .sub_app_mut(RenderApp)
             .add_render_command::<Transparent3d, DrawGrid>()
             .init_resource::<SpecializedMeshPipelines<GridPipeline>>()
             .add_systems(
                 Render,
                 (
-                    Self::queue_custom.in_set(RenderSet::QueueMeshes),
-                    Self::prepare_instance_buffers.in_set(RenderSet::PrepareResources),
-                    Self::extract_model_index
-                        .after(RenderSet::PrepareResources)
-                        .before(RenderSet::PrepareResourcesFlush),
+                    queue_grid.in_set(RenderSet::QueueMeshes),
+                    prepare_instance_buffers.in_set(RenderSet::PrepareResources),
                 ),
             );
     }
@@ -108,250 +105,333 @@ impl Plugin for GridPlugin {
 
 #[derive(AsBindGroup, ShaderType, Default, Zeroable, Pod, Copy, Clone)]
 #[repr(C)]
-struct GridData {
+struct GridUniform {
     _padding: UVec3,
     #[uniform(0)]
     model_index: u32,
 }
 
-impl GridPlugin {
-    fn prepare_instance_buffers(
-        mut commands: Commands,
-        query: Query<(Entity, Ref<GridInstances>)>,
-        render_device: Res<RenderDevice>,
-        pipeline: Res<GridPipeline>,
-    ) {
-        for (entity, grid_instance_data) in &query {
-            let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("Grid Instance Data Buffer"),
-                contents: bytemuck::cast_slice(grid_instance_data.as_slice()),
-                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+fn prepare_instance_buffers(
+    mut commands: Commands,
+    query: Query<(Entity, Ref<GridInstances>)>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, grid_instance_data) in &query {
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("Grid Instance Data Buffer"),
+            contents: bytemuck::cast_slice(grid_instance_data.as_slice()),
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        });
+
+        commands.entity(entity).insert((InstanceBuffer {
+            buffer,
+            length: grid_instance_data.len(),
+        },));
+    }
+}
+
+fn queue_grid(
+    transparent_3d_draw_functions: Res<DrawFunctions<Transparent3d>>,
+    grid_pipeline: Res<GridPipeline>,
+    msaa: Res<Msaa>,
+    mut pipelines: ResMut<SpecializedMeshPipelines<GridPipeline>>,
+    pipeline_cache: Res<PipelineCache>,
+    meshes: Res<RenderAssets<Mesh>>,
+    render_mesh_instances: Res<RenderMeshInstances>,
+    material_meshes: Query<Entity, With<GridInstances>>,
+    mut views: Query<
+        (&ExtractedView, &mut RenderPhase<Transparent3d>, Entity),
+        With<PrimaryCamera>,
+    >,
+) {
+    let draw_custom = transparent_3d_draw_functions.read().id::<DrawGrid>();
+    let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
+
+    for (view, mut transparent_phase, _) in &mut views {
+        let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
+
+        let rangefinder = view.rangefinder3d();
+
+        for entity in &material_meshes {
+            let Some(mesh_instance) = render_mesh_instances.get(&entity) else {
+                continue;
+            };
+            let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
+                continue;
+            };
+
+            let key = view_key
+                | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology)
+                | MeshPipelineKey::BLEND_ALPHA;
+
+            let pipeline = pipelines
+                .specialize(&pipeline_cache, &grid_pipeline, key, &mesh.layout)
+                .unwrap();
+
+            transparent_phase.add(Transparent3d {
+                entity,
+                pipeline,
+                draw_function: draw_custom,
+                distance: rangefinder
+                    .distance_translation(&mesh_instance.transforms.transform.translation),
+                batch_range: 0..1,
+                dynamic_offset: None,
             });
+        }
+    }
+}
 
-            commands.entity(entity).insert((
-                InstanceBuffer {
-                    buffer,
-                    length: grid_instance_data.len(),
+fn setup_grid(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+    commands.spawn((
+        meshes.add(create_grid_base(10, 1.0)),
+        SpatialBundle::default(),
+        GridInstances::default(),
+        NoFrustumCulling,
+        Grid3d,
+    ));
+}
+
+fn frustum_corners_to_lines(corners: &[Vec3A; 8]) -> [(Vec3A, Vec3A); 12] {
+    [
+        // Near plane edges
+        (corners[0], corners[1]), // bottom right to top right
+        (corners[1], corners[2]), // top right to top left
+        (corners[2], corners[3]), // top left to bottom left
+        (corners[3], corners[0]), // bottom left to bottom right
+        // Far plane edges
+        (corners[4], corners[5]), // bottom right to top right
+        (corners[5], corners[6]), // top right to top left
+        (corners[6], corners[7]), // top left to bottom left
+        (corners[7], corners[4]), // bottom left to bottom right
+        // Connecting edges between near and far planes
+        (corners[0], corners[4]), // bottom right near to far
+        (corners[1], corners[5]), // top right near to far
+        (corners[2], corners[6]), // top left near to far
+        (corners[3], corners[7]), // bottom left near to far
+    ]
+}
+
+fn line_intersects_plane_at(line: &(Vec3, Vec3), plane: &Plane3d) -> Option<Vec3> {
+    let origin = line.0;
+    let range = line.1 - line.0;
+    let direction = range.normalize();
+    let max = range.length();
+
+    let ray = Ray3d::new(origin, direction);
+
+    match ray.intersect_plane(Vec3::ZERO, plane.clone()) {
+        Some(t) => {
+            if t < max {
+                Some(ray.get_point(t))
+            } else {
+                None
+            }
+        }
+        None => None,
+    }
+}
+
+fn update_grid(
+    mut grid: Query<(&mut GridInstances, &Visibility), With<Grid3d>>,
+    camera: Query<(&Projection, &PanOrbitState, Ref<Transform>), With<PrimaryCamera>>,
+) {
+    let Ok((mut grid, visibility)) = grid.get_single_mut() else {
+        return;
+    };
+
+    if visibility == Visibility::Hidden {
+        return;
+    }
+
+    let (projection, orbit_state, camera_transform) = camera.single();
+
+    if !(camera_transform.is_added() || camera_transform.is_changed()) {
+        return;
+    }
+
+    let camera_orientation = Quat::from_rotation_arc(Vec3::Z, camera_transform.forward().into());
+
+    let plane = Plane3d::new(Direction3d::Y.into());
+
+    let frustum_corners = match projection {
+        Projection::Perspective(projection) => projection.get_frustum_corners(
+            projection.near,
+            plane.normal.dot(camera_transform.forward().into()).abs() * projection.far,
+        ),
+        Projection::Orthographic(projection) => {
+            projection.get_frustum_corners(projection.near, projection.far)
+        }
+    };
+
+    let lines = frustum_corners_to_lines(&frustum_corners);
+
+    let transform_point = |point: Vec3A| -> Vec3 {
+        let point = camera_orientation * Vec3::from(point) + camera_transform.translation;
+        point
+    };
+
+    let aabb = lines
+        .iter()
+        .map(|line| (transform_point(line.0), transform_point(line.1)))
+        .fold(None, |bounds, line| {
+            let intersection = line_intersects_plane_at(&line, &plane);
+
+            match intersection {
+                Some(intersection) => match bounds {
+                    Some((min, max)) => {
+                        let min = intersection.min(min);
+                        let max = intersection.max(max);
+                        Some((min, max))
+                    }
+                    None => Some((intersection, intersection)),
                 },
-                GridUniformBindGroup {
-                    bind_group: pipeline.bind_group.clone(),
-                },
-            ));
-        }
-    }
-
-    fn extract_model_index(
-        grid: Query<Entity, (With<GridUniformBindGroup>, Without<PrimaryCamera>)>,
-        views: Query<&RenderPhase<Transparent3d>, With<PrimaryCamera>>,
-        mut pipeline: ResMut<GridPipeline>,
-        render_device: Res<RenderDevice>,
-        render_queue: Res<RenderQueue>,
-    ) {
-        let Ok(entity) = grid.get_single() else {
-            return;
-        };
-
-        // This is a bit of a hack to extract the batch range storing the entity model index. It is temporary util i can figure out our to
-        // update the model index from the draw functions.
-        for phase in &views {
-            for item in phase.items.iter() {
-                if item.entity() == entity {
-                    let mut range = item.batch_range().clone();
-                    let model_index = range.next().unwrap();
-                    pipeline.uniform.set(GridData {
-                        model_index,
-                        ..Default::default()
-                    });
-
-                    pipeline
-                        .uniform
-                        .write_buffer(&*render_device, &*render_queue);
-                }
+                None => bounds,
             }
-        }
+        })
+        .map_or(None, |(min, max)| Some(Aabb3d { min, max }));
+
+    grid.clear();
+
+    let Some(mut aabb) = aabb else {
+        info!("Plane is not visible");
+        return;
+    };
+
+    let area = aabb.visible_area();
+    info!("{}", area * 0.5);
+
+    let distance = orbit_state.radius;
+
+    let size = if distance > 12000.0 {
+        10000.0f32
+    } else if distance > 800.0 {
+        1000.0f32
+    } else if distance > 200.0 {
+        100.0f32
+    } else {
+        10.0f32
+    };
+
+    let half_size = size * 0.5;
+    let padding = 10.0;
+
+    aabb.min -= padding;
+    aabb.max += padding;
+
+    let compute_starting_min = |value: Vec3| -> Vec3 {
+        Vec3::new(
+            utils::multiples::largest_multiple_less_than_or_equal_to(value.x, size),
+            0.0,
+            utils::multiples::largest_multiple_less_than_or_equal_to(value.z, size),
+        )
+    };
+
+    let compute_starting_max = |value: Vec3| -> Vec3 {
+        Vec3::new(
+            utils::multiples::smallest_multiple_greater_than_or_equal_to(value.x, size),
+            0.0,
+            utils::multiples::smallest_multiple_greater_than_or_equal_to(value.z, size),
+        )
+    };
+
+    // let (min, max) = (
+    //     compute_starting_min(aabb.min),
+    //     compute_starting_max(aabb.max),
+    // );
+
+    // for x in (min.x as i32..=max.x as i32).step_by(size as usize) {
+    //     for z in (min.z as i32..=max.z as i32).step_by(size as usize) {
+    //         grid.push(GridInstanceData {
+    //             position: Vec3::new(x as f32, 0.0, z as f32),
+    //             scale: size / 10.0,
+    //         });
+    //     }
+    // }
+
+    info!("Grid size: {}", grid.len());
+
+    let distance = orbit_state.radius;
+
+    let (base_size, scale) = if distance > 12000.0 {
+        (10000, 1000.0)
+    } else if distance > 800.0 {
+        (1000, 100.0)
+    } else if distance > 200.0 {
+        (100, 10.0)
+    } else {
+        (10, 1.0)
+    };
+
+    let grid_size = 30;
+    let half_size = (grid_size * base_size) as i32 / 2;
+
+    for i in 0..grid_size * grid_size {
+        let x = (i as usize % grid_size as usize) as i32 * base_size - half_size + base_size / 2;
+        let z = (i as usize / grid_size as usize) as i32 * base_size - half_size + base_size / 2;
+
+        grid.push(GridInstanceData {
+            position: Vec3::new(x as f32, 0.0, z as f32),
+            scale,
+        });
     }
-    fn queue_custom(
-        transparent_3d_draw_functions: Res<DrawFunctions<Transparent3d>>,
-        grid_pipeline: Res<GridPipeline>,
-        msaa: Res<Msaa>,
-        mut pipelines: ResMut<SpecializedMeshPipelines<GridPipeline>>,
-        pipeline_cache: Res<PipelineCache>,
-        meshes: Res<RenderAssets<Mesh>>,
-        render_mesh_instances: Res<RenderMeshInstances>,
-        material_meshes: Query<Entity, With<GridInstances>>,
-        mut views: Query<
-            (&ExtractedView, &mut RenderPhase<Transparent3d>, Entity),
-            With<PrimaryCamera>,
-        >,
-    ) {
-        let draw_custom = transparent_3d_draw_functions.read().id::<DrawGrid>();
-        let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
+}
 
-        for (view, mut transparent_phase, entity) in &mut views {
-            let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
+fn create_grid_base(size: u32, spacing: f32) -> Mesh {
+    let half_size = (size as f32 * 0.5) as i32;
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    let mut colors = Vec::new();
 
-            let rangefinder = view.rangefinder3d();
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::LineList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
 
-            for entity in &material_meshes {
-                let Some(mesh_instance) = render_mesh_instances.get(&entity) else {
-                    continue;
-                };
-                let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
-                    continue;
-                };
+    let mut index: u16 = 0;
 
-                let key = view_key
-                    | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology)
-                    | MeshPipelineKey::BLEND_ALPHA;
+    let line_color = [0.1, 0.1, 0.1, 1.0f32];
+    let line_edge_color = [0.12, 0.12, 0.12, 1.0f32];
 
-                let pipeline = pipelines
-                    .specialize(&pipeline_cache, &grid_pipeline, key, &mesh.layout)
-                    .unwrap();
+    for i in -half_size..=half_size {
+        let x = i as f32 * spacing;
+        positions.push(Vec3::new(x, 0.0, -half_size as f32 * spacing));
+        positions.push(Vec3::new(x, 0.0, half_size as f32 * spacing));
+        indices.push(index);
+        indices.push(index + 1);
 
-                transparent_phase.add(Transparent3d {
-                    entity,
-                    pipeline,
-                    draw_function: draw_custom,
-                    distance: rangefinder
-                        .distance_translation(&mesh_instance.transforms.transform.translation),
-                    batch_range: 0..1,
-                    dynamic_offset: None,
-                });
-            }
-        }
-    }
-
-    fn setup_main_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-        let grid_size = 30;
-        let half_size = (grid_size / 10) as i32 * 5;
-        commands.spawn((
-            meshes.add(Self::create_grid3d_mesh(10, 1.0)),
-            SpatialBundle::default(),
-            GridInstances(
-                (0..(grid_size * grid_size))
-                    .map(|i| {
-                        let x = (i % grid_size) as i32 * 10 - half_size * 10 + 5;
-                        let z = (i / grid_size) as i32 * 10 - half_size * 10 + 5;
-
-                        GridInstanceData {
-                            position: Vec3::new(x as f32, 0.0, z as f32),
-                            scale: 1.0,
-                        }
-                    })
-                    .collect(),
-            ),
-            NoFrustumCulling,
-            Grid3d,
-        ));
-    }
-
-    fn update(
-        mut grids: Query<(&mut GridInstances, &Visibility), With<Grid3d>>,
-        camera: Query<(&Projection, &PanOrbitState), With<PrimaryCamera>>,
-    ) {
-        let Ok((mut grid, visibility)) = grids.get_single_mut() else {
-            return;
-        };
-
-        if visibility == Visibility::Hidden {
-            return;
-        }
-
-        let (projection, orbit_state) = camera.single();
-
-        let plane = Plane3d::new(Vec3::new(0.0, 1.0, 0.0));
-
-        let frustum_corners = match projection {
-            Projection::Perspective(projection) => {
-                projection.get_frustum_corners(projection.near, projection.far)
-            }
-            Projection::Orthographic(projection) => {
-                projection.get_frustum_corners(projection.near, projection.far)
-            }
-        };
-
-        let distance = orbit_state.radius;
-
-        let (base_size, scale) = if distance > 12000.0 {
-            (10000, 1000.0)
-        } else if distance > 800.0 {
-            (1000, 100.0)
-        } else if distance > 100.0 {
-            (100, 10.0)
+        if i == -half_size || i == half_size {
+            colors.push(line_edge_color);
+            colors.push(line_edge_color);
         } else {
-            (10, 1.0)
-        };
-
-        let grid_size = 30;
-
-        let half_size = (grid_size * base_size) as i32 / 2;
-
-        for (i, instance) in grid.iter_mut().enumerate() {
-            let x = (i % grid_size as usize) as i32 * base_size - half_size + base_size / 2;
-            let z = (i / grid_size as usize) as i32 * base_size - half_size + base_size / 2;
-
-            instance.position = Vec3::new(x as f32, 0.0, z as f32);
-            instance.scale = scale;
+            colors.push(line_color.clone());
+            colors.push(line_color.clone());
         }
+        index += 2
     }
 
-    fn create_grid3d_mesh(size: u32, spacing: f32) -> Mesh {
-        let half_size = (size as f32 * 0.5) as i32;
-        let mut positions = Vec::new();
-        let mut indices = Vec::new();
-        let mut colors = Vec::new();
+    for i in -half_size..=half_size {
+        let z = i as f32 * spacing;
+        positions.push(Vec3::new(-half_size as f32 * spacing, 0.0, z));
+        positions.push(Vec3::new(half_size as f32 * spacing, 0.0, z));
+        indices.push(index);
+        indices.push(index + 1);
 
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::LineList,
-            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-        );
-
-        let mut index: u16 = 0;
-
-        let line_color = [0.1, 0.1, 0.1, 1.0f32];
-        let line_edge_color = [0.12, 0.12, 0.12, 1.0f32];
-
-        for i in -half_size..=half_size {
-            let x = i as f32 * spacing;
-            positions.push(Vec3::new(x, 0.0, -half_size as f32 * spacing));
-            positions.push(Vec3::new(x, 0.0, half_size as f32 * spacing));
-            indices.push(index);
-            indices.push(index + 1);
-
-            if i == -half_size || i == half_size {
-                colors.push(line_edge_color);
-                colors.push(line_edge_color);
-            } else {
-                colors.push(line_color.clone());
-                colors.push(line_color.clone());
-            }
-            index += 2
+        if i == -half_size || i == half_size {
+            colors.push(line_edge_color);
+            colors.push(line_edge_color);
+        } else {
+            colors.push(line_color);
+            colors.push(line_color);
         }
 
-        for i in -half_size..=half_size {
-            let z = i as f32 * spacing;
-            positions.push(Vec3::new(-half_size as f32 * spacing, 0.0, z));
-            positions.push(Vec3::new(half_size as f32 * spacing, 0.0, z));
-            indices.push(index);
-            indices.push(index + 1);
-
-            if i == -half_size || i == half_size {
-                colors.push(line_edge_color);
-                colors.push(line_edge_color);
-            } else {
-                colors.push(line_color);
-                colors.push(line_color);
-            }
-
-            index += 2
-        }
-        let normals = vec![[0.0, 1.0, 0.0f32]; positions.len()];
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_indices(Indices::U16(indices));
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-        return mesh;
+        index += 2
     }
+    let normals = vec![[0.0, 1.0, 0.0f32]; positions.len()];
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_indices(Indices::U16(indices));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    return mesh;
 }
 
 #[derive(Resource)]
@@ -359,12 +439,7 @@ struct GridPipeline {
     shader: Handle<Shader>,
     mesh_pipeline: MeshPipeline,
     bind_group_layout: BindGroupLayout,
-    uniform: UniformBuffer<GridData>,
-    bind_group: BindGroup,
-}
-
-#[derive(Component)]
-struct GridUniformBindGroup {
+    uniform: UniformBuffer<GridUniform>,
     bind_group: BindGroup,
 }
 
@@ -377,7 +452,7 @@ impl FromWorld for GridPipeline {
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
 
-        let mut uniform = UniformBuffer::from(GridData::default());
+        let mut uniform = UniformBuffer::from(GridUniform::default());
 
         let bind_group_layout = render_device.create_bind_group_layout(
             "Grid Uniform Bind Group Layout",
@@ -433,7 +508,7 @@ impl SpecializedMeshPipeline for GridPipeline {
             attributes: vec![VertexAttribute {
                 format: VertexFormat::Float32x4,
                 offset: 0,
-                shader_location: 3, // shader locations 0-2 are taken up by Position, Normal and UV attributes
+                shader_location: 3,
             }],
         });
         descriptor.fragment.as_mut().unwrap().shader = self.shader.clone();
@@ -447,29 +522,35 @@ type DrawGrid = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshBindGroup<1>,
-    SetGridUniforms<2>,
+    SetGridUniformBindGroup<2>,
     DrawMeshInstanced,
 );
 
-struct SetGridUniforms<const I: usize>;
+struct SetGridUniformBindGroup<const I: usize>;
 
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGridUniforms<I> {
-    type Param = ();
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetGridUniformBindGroup<I> {
+    type Param = (SRes<RenderQueue>, SRes<GridPipeline>);
     type ViewQuery = ();
-    type ItemQuery = Read<GridUniformBindGroup>;
+    type ItemQuery = ();
 
     fn render<'w>(
-        _item: &P,
+        item: &P,
         _view: bevy::ecs::query::ROQueryItem<'w, Self::ViewQuery>,
-        uniform: Option<bevy::ecs::query::ROQueryItem<'w, Self::ItemQuery>>,
-        _param: bevy::ecs::system::SystemParamItem<'w, '_, Self::Param>,
+        _query: Option<bevy::ecs::query::ROQueryItem<'w, Self::ItemQuery>>,
+        (render_queue, grid_pipeline): bevy::ecs::system::SystemParamItem<'w, '_, Self::Param>,
         pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(bind_group) = uniform else {
-            return RenderCommandResult::Failure;
-        };
-
-        pass.set_bind_group(I, &bind_group.bind_group, &[]);
+        let model_index = item.batch_range().clone().next().unwrap();
+        render_queue.write_buffer(
+            grid_pipeline.uniform.buffer().unwrap(),
+            0,
+            bytemuck::cast_slice(&[GridUniform {
+                model_index,
+                ..Default::default()
+            }]),
+        );
+        let grid_pipeline = grid_pipeline.into_inner();
+        pass.set_bind_group(I, &grid_pipeline.bind_group, &[]);
         RenderCommandResult::Success
     }
 }
