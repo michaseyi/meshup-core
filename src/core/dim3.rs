@@ -189,6 +189,7 @@ impl Torus {
             None => None,
         }
     }
+    
     pub fn intersects_ray(&self, ray: &RayCast3d) -> bool {
         self.intersets_ray_at(ray).is_some()
     }

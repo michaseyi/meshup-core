@@ -88,10 +88,8 @@ impl Plugin for EditorPlugin {
         .add_systems(
             Update,
             (
-                Self::wireframe_focused,
-                // bvh_debug_system
-            )
-                .after(ToolSet::Update),
+                // Self::wireframe_focused,
+                 bvh_debug_system).after(ToolSet::Update),
         )
         .add_systems(
             Update,
@@ -230,7 +228,7 @@ impl EditorPlugin {
         let (config, _) = gizmo_config.config_mut::<DefaultGizmoConfigGroup>();
         // config.depth_bias = -0.001;
         config.line_width = 1.5;
-        config.depth_bias = 0.2;
+        // config.depth_bias = 0.2;
         // config.line_width = 3.0;
 
         ambient_light.brightness = 250.0;
